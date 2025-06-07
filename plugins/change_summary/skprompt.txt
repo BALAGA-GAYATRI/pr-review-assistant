@@ -1,0 +1,4 @@
+Create a concise summary of what changes were made in this GitHub PR diff.
+Focus on what was modified, added, or deleted in the code.
+
+{{$input}}
