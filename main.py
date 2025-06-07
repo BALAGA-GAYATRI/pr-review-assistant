@@ -1,72 +1,133 @@
 import os
 import dotenv
 import requests
+import asyncio
 from semantic_kernel import Kernel
 from semantic_kernel.connectors.ai.open_ai import AzureChatCompletion
-from semantic_kernel.connectors.ai.prompt_execution_settings import OpenAIPromptExecutionSettings
 
 # Load environment variables
 dotenv.load_dotenv()
 
+# Define plugin class with detailed prompts
+class PRReviewPlugin:
+    def summarize(self, input: str) -> str:
+        return f"""
+        You are an expert software engineer. Summarize the changes in the GitHub pull request diff below.
+
+        Focus on:
+        - What files were changed
+        - What kind of changes were made (e.g., bug fixes, new features, refactors)
+        - The overall purpose of the changes
+
+        Be clear and concise. Avoid excessive technical jargon.
+
+        Diff:
+        {input}
+
+        Summary:
+        """
+
+    def critique(self, input: str) -> str:
+        return f"""
+        You are a senior software engineer reviewing the following GitHub pull request diff.
+
+        Provide constructive feedback on:
+        - Possible bugs or logic issues
+        - Code style or best practice concerns
+        - Opportunities to improve readability, performance, or structure
+        - Missing documentation or tests
+
+        Be professional and helpful.
+
+        Diff:
+        {input}
+
+        Critique:
+        """
+
+    def generate_comment(self, input: str) -> str:
+        return f"""
+        You are a friendly and professional GitHub bot. Use the summary and critique below to generate a constructive comment for a pull request.
+
+        Make sure to:
+        - Start with a positive note
+        - Present the summary clearly
+        - Highlight important points from the critique
+        - Encourage collaboration and improvement
+
+        Input:
+        {input}
+
+        GitHub PR Comment:
+        """
+
+# Initialize Semantic Kernel and Azure OpenAI chat service
 kernel = Kernel()
-kernel.add_text_completion_service(
-    "azure-openai-gpt",
-    AzureChatCompletion(
-        deployment_name=os.getenv("AZURE_OPENAI_DEPLOYMENT_NAME"),
-        endpoint=os.getenv("AZURE_OPENAI_ENDPOINT"),
-        api_key=os.getenv("AZURE_OPENAI_API_KEY"),
-        api_version=os.getenv("AZURE_OPENAI_API_VERSION")
-    )
+azure_openai_chat = AzureChatCompletion(
+    endpoint=os.getenv("AZURE_OPENAI_ENDPOINT"),
+    api_key=os.getenv("AZURE_OPENAI_API_KEY"),
+    deployment_name=os.getenv("AZURE_OPENAI_DEPLOYMENT_NAME"),
+    api_version=os.getenv("AZURE_OPENAI_API_VERSION"),
 )
-kernel.set_default_text_completion_service("azure-openai-gpt")
+kernel.add_service(azure_openai_chat, "chat")
 
-# Import skills from plugins
-plugins = {}
-for plugin_name in ["diff_reader", "change_summary", "review_critique", "comment_generator"]:
-    plugins[plugin_name] = kernel.import_semantic_skill_from_directory("plugins", plugin_name)
+# Register the plugin
+plugin = PRReviewPlugin()
+kernel.add_plugin(plugin, "pr_review_plugin")
 
-# Get PR diff from GitHub
+# GitHub API helpers
 def get_pr_diff():
-    headers = {"Authorization": f"Bearer {os.getenv('GITHUB_TOKEN')}", "Accept": "application/vnd.github.v3.diff"}
+    headers = {
+        "Authorization": f"Bearer {os.getenv('GITHUB_TOKEN')}",
+        "Accept": "application/vnd.github.v3.diff"
+    }
     repo = os.getenv("GITHUB_REPO")
     pr_number = os.getenv("GITHUB_PR_NUMBER")
     url = f"https://api.github.com/repos/{repo}/pulls/{pr_number}"
     response = requests.get(url, headers=headers)
-    return response.text if response.ok else None
+    if response.ok:
+        return response.text
+    print(f"❌ Failed to fetch PR diff: {response.status_code} {response.text}")
+    return None
 
-# Post a comment to PR
-def post_comment(comment):
-    headers = {"Authorization": f"Bearer {os.getenv('GITHUB_TOKEN')}", "Accept": "application/vnd.github+json"}
+def post_comment(comment: str):
+    headers = {
+        "Authorization": f"Bearer {os.getenv('GITHUB_TOKEN')}",
+        "Accept": "application/vnd.github+json"
+    }
     repo = os.getenv("GITHUB_REPO")
     pr_number = os.getenv("GITHUB_PR_NUMBER")
     url = f"https://api.github.com/repos/{repo}/issues/{pr_number}/comments"
-    requests.post(url, headers=headers, json={"body": comment})
+    response = requests.post(url, headers=headers, json={"body": comment})
+    if not response.ok:
+        print(f"❌ Failed to post comment: {response.status_code} {response.text}")
 
-import asyncio
-async def run():
+# Main review pipeline
+async def run_review():
+    print("📥 Fetching PR diff...")
     diff = get_pr_diff()
     if not diff:
-        print("❌ Failed to fetch PR diff")
         return
 
     print("✅ Diff fetched. Generating summary...")
-    summary = await kernel.run_async(plugins["change_summary"]["skprompt"], input_str=diff)
+    summary_prompt = plugin.summarize(diff)
+    summary_result = await kernel.invoke_prompt(summary_prompt)
+    print(summary_result)
+
     print("✅ Summary complete. Generating critique...")
-    critique = await kernel.run_async(plugins["review_critique"]["skprompt"], input_str=diff)
-
-    comment_prompt = f"""
-    Pull Request Summary:
-    {summary.result}
-
-    Review Feedback:
-    {critique.result}
-    """
+    critique_prompt = plugin.critique(diff)
+    critique_result = await kernel.invoke_prompt(critique_prompt)
+    print(critique_result)
+    combined_input = f"Summary:\n{summary_result}\n\nCritique:\n{critique_result}"
 
     print("✅ Generating GitHub comment...")
-    comment = await kernel.run_async(plugins["comment_generator"]["skprompt"], input_str=comment_prompt)
+    comment_prompt = plugin.generate_comment(combined_input)
+    comment_result = await kernel.invoke_prompt(comment_prompt)
+    print(comment_result)
+
     print("✅ Posting comment...")
-    post_comment(comment.result)
+    post_comment(str(comment_result))
     print("✅ Done.")
 
 if __name__ == "__main__":
-    asyncio.run(run())
+    asyncio.run(run_review())

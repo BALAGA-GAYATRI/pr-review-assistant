@@ -1,5 +1,0 @@
-Compose a polite and helpful GitHub PR comment based on the following summary and review:
-
-{{$input}}
-
-Use a friendly tone and encourage the contributor.

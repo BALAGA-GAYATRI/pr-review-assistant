@@ -1,3 +1,0 @@
-Summarize this GitHub diff in plain language.
-
-{{$input}}
